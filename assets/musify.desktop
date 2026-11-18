@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Musify
+GenericName=Music Player
+Comment=Play your music and YouTube Music library
+Exec=musify %F
+Icon=musify
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=musify
+Keywords=music;player;youtube;
