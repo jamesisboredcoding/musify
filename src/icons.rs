@@ -28,6 +28,7 @@ pub enum Icon {
     Minimize,
     Maximize,
     Close,
+    Broadcast,
 }
 
 fn body(icon: Icon) -> &'static str {
@@ -45,6 +46,7 @@ fn body(icon: Icon) -> &'static str {
         Icon::Library => r##"<path d="M5 4v16M10 4v16M14.5 4.5l4.5 15.5"/>"##,
         Icon::Volume => r##"<path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/>"##,
         Icon::Mute => r##"<path d="M11 5 6 9H2v6h4l5 4z"/><path d="m22 9-6 6M16 9l6 6"/>"##,
+        Icon::Broadcast => r##"<circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.4M7.8 16.2a6 6 0 0 1 0-8.4M19.1 4.9a10 10 0 0 1 0 14.2M4.9 19.1a10 10 0 0 1 0-14.2"/>"##,
         Icon::Lyrics => r##"<path d="M4 6h16M4 12h10M4 18h7"/>"##,
         Icon::Expand => r##"<path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/>"##,
         Icon::Down => r##"<path d="m6 9 6 6 6-6"/>"##,

@@ -106,7 +106,7 @@ impl Musify {
     }
 
     fn radius(&self) -> f32 {
-        if self.maximized { 0.0 } else { 12.0 }
+        if self.maximized || self.fullscreen { 0.0 } else { 12.0 }
     }
 
     pub fn view(&self) -> El<'_> {
@@ -139,7 +139,7 @@ impl Musify {
             let splash = container(splash).style(theme::corners(Color::TRANSPARENT, Radius::from(r))).clip(true);
             layers = layers.push(mouse_area(splash).on_press(Message::Drag));
         }
-        if !self.maximized {
+        if !self.maximized && !self.fullscreen {
             layers = layers.push(resize_edges());
         }
         layers.into()
@@ -158,7 +158,7 @@ impl Musify {
         ]
         .align_y(Alignment::Center)
         .padding(Padding { top: 14.0, right: 20.0, bottom: 10.0, left: 24.0 });
-        mouse_area(bar).on_press(Message::Drag).on_double_click(Message::ToggleMaximize).into()
+        mouse_area(bar).on_press(Message::Drag).on_double_click(Message::ToggleFullscreen).into()
     }
 
     fn history(&self) -> El<'_> {
@@ -197,7 +197,7 @@ impl Musify {
                 .padding(Padding { top: 4.0, right: 0.0, bottom: 14.0, left: 6.0 }),
         )
         .on_press(Message::Drag)
-        .on_double_click(Message::ToggleMaximize);
+        .on_double_click(Message::ToggleFullscreen);
 
         let search = container(
             row![
@@ -331,7 +331,7 @@ impl Musify {
         let content = column![
             mouse_area(container(wordmark_disc(22.0)).center_x(Length::Fill).padding([4, 0]))
                 .on_press(Message::Drag)
-                .on_double_click(Message::ToggleMaximize),
+                .on_double_click(Message::ToggleFullscreen),
             gap(10.0),
             nav(Icon::Home, Page::Home),
             nav(Icon::Library, Page::Songs),
@@ -801,11 +801,30 @@ impl Musify {
         .into()
     }
 
+    /// Turns the Discord "Listening to" status on and off.
+    fn discord_toggle(&self) -> El<'_> {
+        let ready = crate::discord::Discord::configured();
+        let on = self.discord.is_some();
+        let tip = match (ready, on) {
+            (false, _) => "Discord status isn't set up in this build",
+            (true, true) => "Showing on Discord. Click to stop",
+            (true, false) => "Show what you're playing on Discord",
+        };
+        tooltip(
+            icon_button(Icon::Broadcast, 18.0, 32.0, if on { AMBER } else { HAZE }, ready.then_some(Message::ToggleDiscord)),
+            container(label(tip, 12.5, theme::BODY, PAPER)).padding([5, 9]).style(theme::rounded(RAISED, 6.0)),
+            tooltip::Position::Top,
+        )
+        .gap(6)
+        .into()
+    }
+
     fn output(&self) -> El<'_> {
         let vol_icon = if self.muted || self.volume == 0.0 { Icon::Mute } else { Icon::Volume };
         row![
             icon_button(Icon::Lyrics, 18.0, 32.0, if self.now_playing { AMBER } else { HAZE }, self.cursor.map(|_| Message::ToggleNowPlaying)),
             icon_button(Icon::Expand, 17.0, 32.0, HAZE, self.cursor.map(|_| Message::ToggleNowPlaying)),
+            self.discord_toggle(),
             icon_button(vol_icon, 18.0, 32.0, HAZE, Some(Message::ToggleMute)),
             slider(0.0..=1.0, if self.muted { 0.0 } else { self.volume }, Message::Volume).step(0.01_f32).width(88).style(theme::volume),
         ]

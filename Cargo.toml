@@ -13,6 +13,7 @@ audio = ["dep:rodio"]
 
 [dependencies]
 dirs = "7.0.0"
+discord-rich-presence = "1.1.0"
 iced = { version = "0.14", features = ["canvas", "tokio", "image", "advanced", "svg"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 lofty = "0.25"
@@ -27,3 +28,7 @@ walkdir = "2.5.0"
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# iced_winit with one fix: fullscreen goes to the monitor the window is on (see vendor/iced_winit/src/lib.rs, SetMode).
+[patch.crates-io]
+iced_winit = { path = "vendor/iced_winit" }

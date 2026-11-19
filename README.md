@@ -46,6 +46,9 @@ musify ~/some/folder   # reads another folder
 - The strip under the controls is the queue, each song as wide as it is long. Click the
   current song to seek, or a later one to jump to it.
 - Search looks through your library and all of YouTube Music: songs, albums and playlists.
+- The broadcast button next to the volume shows what you're playing on your Discord profile
+  ("Listening to …", with the cover and a link for YouTube songs). It's off by default and only
+  talks to the Discord app running on your computer.
 - Space plays and pauses. Escape leaves Now playing.
 - Lyrics come from an `.lrc` file next to a local song, otherwise from
   [LRCLIB](https://lrclib.net) or YouTube Music (this sends the song's title, artist, album

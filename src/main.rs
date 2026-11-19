@@ -1,6 +1,7 @@
 mod anim;
 mod audio;
 mod canvas;
+mod discord;
 mod icons;
 mod library;
 mod lyrics;
@@ -90,7 +91,12 @@ pub enum Message {
     DragResize(Direction),
     Minimize,
     ToggleMaximize,
+    /// Double-clicking the top bar or F11: true fullscreen, over the panels.
+    ToggleFullscreen,
+    /// Show what's playing on your Discord profile.
+    ToggleDiscord,
     Maximized(bool),
+    Fullscreen(bool),
     Close,
     Loaded(Arc<Library>),
     Open(Page),
@@ -158,6 +164,10 @@ pub struct Musify {
     pub window: Option<window::Id>,
     pub size: Size,
     pub maximized: bool,
+    pub fullscreen: bool,
+    /// Running while the Discord status is on.
+    pub discord: Option<discord::Discord>,
+    discord_sent: Option<discord::Presence>,
     pub root: PathBuf,
     pub library: Option<Arc<Library>>,
     pub page: Page,
@@ -234,6 +244,9 @@ impl Musify {
             window: None,
             size: initial_size(),
             maximized: false,
+            fullscreen: false,
+            discord: (load_discord() && discord::Discord::configured()).then(discord::Discord::start),
+            discord_sent: None,
             root,
             library: None,
             page: Page::Home,
@@ -300,20 +313,94 @@ impl Musify {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        self.sync_discord();
+        task
+    }
+
+    /// Sends Discord the current song when it, play/pause or the position (a seek) changed.
+    fn sync_discord(&mut self) {
+        let Some(discord) = &self.discord else { return };
+        let now = self.discord_presence();
+        let same = match (&now, &self.discord_sent) {
+            (Some(a), Some(b)) => {
+                let close = match (a.span, b.span) {
+                    (Some((x, _)), Some((y, _))) => (x - y).abs() < 2000,
+                    (None, None) => true,
+                    _ => false,
+                };
+                close && discord::Presence { span: None, ..a.clone() } == discord::Presence { span: None, ..b.clone() }
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            discord.set(now.clone());
+            self.discord_sent = now;
+        }
+    }
+
+    fn discord_presence(&self) -> Option<discord::Presence> {
+        let lib = self.library.as_ref()?;
+        let t = self.current_track()?;
+        let track = &lib.tracks[t];
+        let playing = self.playing && self.waiting != Some(t);
+        let span = playing.then(|| {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+            let start = now - self.position.as_millis() as i64;
+            (start, start + track.duration.as_millis() as i64)
+        });
+        let link = match &track.origin {
+            Origin::YouTube(id) => Some(format!("https://music.youtube.com/watch?v={id}")),
+            Origin::File(_) => None,
+        };
+        Some(discord::Presence {
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album_title.clone(),
+            cover: track.cover.remote.clone().or_else(|| track.cover.url.clone()).filter(|u| u.starts_with("https://")),
+            link,
+            span,
+        })
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::WindowId(id) => self.window = id,
             Message::Resized(size) => {
                 self.size = size;
                 // Keep in step with maximizes the compositor does itself (shortcuts, edge snapping).
-                return self.with_window(|id| window::is_maximized(id).map(Message::Maximized));
+                return self.with_window(|id| {
+                    Task::batch([
+                        window::is_maximized(id).map(Message::Maximized),
+                        window::mode(id).map(|m| Message::Fullscreen(m == window::Mode::Fullscreen)),
+                    ])
+                });
             }
             Message::Maximized(m) => self.maximized = m,
+            Message::Fullscreen(f) => self.fullscreen = f,
+            // A drag in fullscreen would swallow the second click of a double-click.
+            Message::Drag if self.fullscreen => {}
             Message::Drag => return self.with_window(window::drag),
             Message::DragResize(d) => return self.with_window(move |id| window::drag_resize(id, d)),
             Message::Minimize => return self.with_window(|id| window::minimize(id, true)),
+            // The maximize button brings a fullscreen window back first.
+            Message::ToggleMaximize if self.fullscreen => return self.update(Message::ToggleFullscreen),
             Message::ToggleMaximize => {
                 self.maximized = !self.maximized;
                 return self.with_window(window::toggle_maximize);
+            }
+            Message::ToggleFullscreen => {
+                self.fullscreen = !self.fullscreen;
+                let mode = if self.fullscreen { window::Mode::Fullscreen } else { window::Mode::Windowed };
+                return self.with_window(move |id| window::set_mode(id, mode));
+            }
+            Message::ToggleDiscord => {
+                if self.discord.take().is_none() {
+                    self.discord = Some(discord::Discord::start());
+                }
+                self.discord_sent = None;
+                save_discord(self.discord.is_some());
             }
             Message::Close => return iced::exit(),
             Message::Loaded(lib) => {
@@ -517,7 +604,13 @@ impl Musify {
             }
             Message::Frame(at) => return self.frame(at),
             Message::Space => return self.update(Message::TogglePlay),
-            Message::Escape => self.close_now_playing(),
+            Message::Escape => {
+                if self.now_playing {
+                    self.close_now_playing();
+                } else if self.fullscreen {
+                    return self.update(Message::ToggleFullscreen);
+                }
+            }
             Message::YtConnect => {
                 self.yt = YtStatus::Connecting;
                 self.signin_tried = false;
@@ -651,6 +744,7 @@ impl Musify {
             keyboard::listen().filter_map(|event| match event {
                 keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Space), .. } => Some(Message::Space),
                 keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. } => Some(Message::Escape),
+                keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::F11), .. } => Some(Message::ToggleFullscreen),
                 _ => None,
             }),
         ];
@@ -895,7 +989,15 @@ impl Musify {
         let Some(lib) = &self.library else { return };
         let track = &lib.tracks[t];
         match self.audio.load(path, track.duration) {
-            Ok(()) => self.playing = true,
+            Ok(length) => {
+                self.playing = true;
+                // Songs from home-page tiles come without a length; the file knows it.
+                if let Some(length) = length.filter(|_| track.duration.is_zero())
+                    && let Some(lib) = self.library.as_mut()
+                {
+                    Arc::make_mut(lib).tracks[t].duration = length;
+                }
+            }
             Err(e) => {
                 self.playing = false;
                 self.notice = Some(format!("Couldn't play {}: {e}", track.title));
@@ -1151,6 +1253,19 @@ fn volume_path() -> Option<PathBuf> {
 }
 
 /// Volume and mute from last time, as "0.62" or "0.62 muted".
+fn discord_path() -> PathBuf {
+    youtube::cookies::data_dir().join("discord.txt")
+}
+
+fn load_discord() -> bool {
+    std::fs::read_to_string(discord_path()).is_ok_and(|s| s.trim() == "on")
+}
+
+fn save_discord(on: bool) {
+    let _ = std::fs::create_dir_all(youtube::cookies::data_dir());
+    let _ = std::fs::write(discord_path(), if on { "on" } else { "off" });
+}
+
 fn load_volume() -> (f32, bool) {
     let saved = volume_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
     let mut parts = saved.split_whitespace();
@@ -1215,6 +1330,7 @@ impl Musify {
         match preview.as_str() {
             "close" => return later(Message::Close),
             "maximize" => return later(Message::ToggleMaximize),
+            "fullscreen" => return later(Message::ToggleFullscreen),
             _ => {}
         }
         let Some(lib) = self.library.clone() else { return Task::none() };

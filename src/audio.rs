@@ -49,23 +49,26 @@ impl Audio {
         matches!(self.backend, Backend::Clock(_))
     }
 
-    pub fn load(&mut self, path: &Path, duration: Duration) -> Result<(), String> {
+    /// Starts the file; returns its length when the decoder knows it.
+    pub fn load(&mut self, path: &Path, duration: Duration) -> Result<Option<Duration>, String> {
         match &mut self.backend {
             #[cfg(feature = "audio")]
             Backend::Rodio { player, .. } => {
                 let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
                 let source = rodio::Decoder::try_from(file).map_err(|e| e.to_string())?;
+                let length = rodio::Source::total_duration(&source);
                 player.clear();
                 player.append(Meter { inner: source, level: self.level.clone(), sum: 0.0, count: 0 });
                 player.set_volume(self.volume * self.volume);
                 player.play();
+                Ok(length)
             }
             Backend::Clock(clock) => {
                 let _ = path;
                 *clock = Clock { loaded: Some(duration), offset: Duration::ZERO, started: Some(Instant::now()) };
+                Ok(None)
             }
         }
-        Ok(())
     }
 
     pub fn play(&mut self) {
