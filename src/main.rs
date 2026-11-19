@@ -27,6 +27,11 @@ pub fn main() -> iced::Result {
         yt_check();
         return Ok(());
     }
+    #[cfg(debug_assertions)]
+    if std::env::args().nth(1).as_deref() == Some("--yt-search") {
+        yt_search(&std::env::args().skip(2).collect::<Vec<_>>().join(" "));
+        return Ok(());
+    }
     let mut app = iced::application(Musify::boot, Musify::update, Musify::view)
         .title("Musify")
         .theme(|_: &Musify| theme::theme())
@@ -123,6 +128,17 @@ pub enum Message {
     LyricsFound(usize, Option<Lyrics>),
     /// Full-resolution cover for the song now playing.
     HiRes(String, Option<Vec<u8>>),
+    /// The search box settled on these words; ask YouTube Music.
+    SearchRun(String),
+    SearchDone(String, Result<youtube::Results, String>),
+}
+
+/// YouTube Music's answer to the current search, as library indices.
+#[derive(Debug, Clone, Default)]
+pub struct Found {
+    pub query: String,
+    pub songs: Vec<usize>,
+    pub collections: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,8 +161,9 @@ pub struct Musify {
     pub root: PathBuf,
     pub library: Option<Arc<Library>>,
     pub page: Page,
-    back: Vec<Page>,
-    forward: Vec<Page>,
+    /// History of (page, search words): a search counts as a place you can go back to.
+    back: Vec<(Page, String)>,
+    forward: Vec<(Page, String)>,
     pub now_playing: bool,
     pub query: String,
     /// Track indices in play order.
@@ -182,6 +199,10 @@ pub struct Musify {
     // YouTube Music
     pub yt: YtStatus,
     yt_client: Option<youtube::Client>,
+    pub found: Found,
+    /// A YouTube Music search is on its way.
+    pub searching: bool,
+    pub search_error: Option<String>,
     signin_tried: bool,
     fetching: HashSet<String>,
     art_loading: HashSet<String>,
@@ -249,6 +270,9 @@ impl Musify {
             ribbon_reveal: Tween::done(),
             yt: YtStatus::Off,
             yt_client: None,
+            found: Found::default(),
+            searching: false,
+            search_error: None,
             signin_tried: false,
             fetching: HashSet::new(),
             art_loading: HashSet::new(),
@@ -306,10 +330,9 @@ impl Musify {
             }
             Message::Open(page) => {
                 let changed = page != self.page || !self.query.is_empty();
-                self.query.clear();
                 self.close_now_playing();
-                if page != self.page {
-                    self.back.push(self.page);
+                if changed {
+                    self.back.push((self.page, std::mem::take(&mut self.query)));
                     self.forward.clear();
                     self.page = page;
                 }
@@ -321,18 +344,22 @@ impl Musify {
                 }
             }
             Message::Back => {
-                if let Some(p) = self.back.pop() {
-                    self.forward.push(self.page);
+                if let Some((p, q)) = self.back.pop() {
+                    self.forward.push((self.page, std::mem::replace(&mut self.query, q)));
                     self.page = p;
+                    self.close_now_playing();
                     self.transition_page();
                 }
+                return self.search_again();
             }
             Message::Forward => {
-                if let Some(p) = self.forward.pop() {
-                    self.back.push(self.page);
+                if let Some((p, q)) = self.forward.pop() {
+                    self.back.push((self.page, std::mem::replace(&mut self.query, q)));
                     self.page = p;
+                    self.close_now_playing();
                     self.transition_page();
                 }
+                return self.search_again();
             }
             Message::Search(q) => {
                 let toggled = q.trim().is_empty() != self.query.trim().is_empty();
@@ -341,6 +368,14 @@ impl Musify {
                 if toggled {
                     self.transition_page();
                 }
+                let words = self.query.trim().to_string();
+                self.search_error = None;
+                if self.yt_client.is_some() && !words.is_empty() && words != self.found.query {
+                    // Wait for typing to pause before asking YouTube.
+                    self.searching = true;
+                    return Task::perform(tokio::time::sleep(Duration::from_millis(350)), move |_| Message::SearchRun(words.clone()));
+                }
+                self.searching = false;
             }
             Message::PlayFrom(source, i) => {
                 if let Some(t) = self.load_first(source, i, false) {
@@ -529,6 +564,26 @@ impl Musify {
                 let songs = liked.map(|c| self.ensure_songs(c)).unwrap_or_else(Task::none);
                 return Task::batch([songs, self.fetch_art()]);
             }
+            Message::SearchRun(words) => {
+                if words != self.query.trim() || words == self.found.query {
+                    return Task::none();
+                }
+                let Some(client) = self.yt_client.clone() else { return Task::none() };
+                return Task::perform(async move { (words.clone(), client.search(&words).await) }, |(w, r)| Message::SearchDone(w, r));
+            }
+            Message::SearchDone(words, result) => {
+                if words != self.query.trim() {
+                    return Task::none();
+                }
+                self.searching = false;
+                match result {
+                    Ok(results) => {
+                        self.merge_search(words, results);
+                        return self.fetch_art();
+                    }
+                    Err(e) => self.search_error = Some(e),
+                }
+            }
             Message::YtSongs(id, result) => {
                 self.fetching.remove(&id);
                 match result {
@@ -664,6 +719,9 @@ impl Musify {
             // Now playing moves with the music, so it needs every frame while it's open.
             || (self.now_playing && self.playing)
             || self.level > 0.01
+            // The "getting song" spinner turns.
+            || self.waiting.is_some()
+            || self.searching
     }
 
     /// Content slides in and the cover-colored wash crossfades to the new page.
@@ -744,11 +802,20 @@ impl Musify {
                 if q.is_empty() {
                     return Vec::new();
                 }
-                all.filter(|&t| {
-                    let tr = &lib.tracks[t];
-                    [&tr.title, &tr.artist, &tr.album_title].iter().any(|s| s.to_lowercase().contains(&q))
-                })
-                .collect()
+                // Your own songs first, then everything YouTube Music found.
+                let mut list: Vec<usize> = all
+                    .filter(|&t| {
+                        let tr = &lib.tracks[t];
+                        [&tr.title, &tr.artist, &tr.album_title].iter().any(|s| s.to_lowercase().contains(&q))
+                    })
+                    .collect();
+                if self.found.query == self.query.trim() {
+                    // Skip songs you already have, even as a different upload of the same song.
+                    let same = |t: usize| (lib.tracks[t].title.to_lowercase(), lib.tracks[t].artist.to_lowercase());
+                    let mut mine: HashSet<(String, String)> = list.iter().map(|&t| same(t)).collect();
+                    list.extend(self.found.songs.iter().copied().filter(|&t| mine.insert(same(t))));
+                }
+                list
             }
         }
     }
@@ -957,6 +1024,24 @@ impl Musify {
             .collect();
     }
 
+    /// Back at a search whose results were replaced since: ask YouTube again.
+    fn search_again(&mut self) -> Task<Message> {
+        let words = self.query.trim().to_string();
+        if self.yt_client.is_none() || words.is_empty() || words == self.found.query {
+            return Task::none();
+        }
+        self.searching = true;
+        self.update(Message::SearchRun(words))
+    }
+
+    fn merge_search(&mut self, query: String, results: youtube::Results) {
+        let Some(lib) = self.library.as_mut() else { return };
+        let lib = Arc::make_mut(lib);
+        let songs = results.songs.into_iter().map(|s| lib.add_video(song_track(s))).collect();
+        let collections = results.collections.into_iter().map(|c| add_card(lib, c, false)).collect();
+        self.found = Found { query, songs, collections };
+    }
+
     fn merge_songs(&mut self, browse_id: &str, songs: Vec<youtube::Song>) {
         if browse_id == "VLLM" {
             self.yt_likes = songs.iter().map(|s| s.video_id.clone()).collect();
@@ -1119,6 +1204,10 @@ impl Musify {
     /// Debug-only: MUSIFY_PREVIEW=album|playing|now|sheet|next jumps to a state for visual checks.
     /// MUSIFY_ALBUM picks the album by title; MUSIFY_PREVIEW=close|maximize fires those after a second.
     fn apply_preview(&mut self) -> Task<Message> {
+        // MUSIFY_SEARCH="words" types a search once YouTube Music has had time to connect.
+        if let Ok(words) = std::env::var("MUSIFY_SEARCH") {
+            return Task::perform(tokio::time::sleep(Duration::from_millis(4000)), move |_| Message::Search(words.clone()));
+        }
         let Ok(preview) = std::env::var("MUSIFY_PREVIEW") else { return Task::none() };
         let later = |m: Message| {
             Task::perform(async { tokio::time::sleep(Duration::from_millis(2600)).await }, move |_| m.clone())
@@ -1152,6 +1241,28 @@ impl Musify {
         }
         Task::none()
     }
+}
+
+/// Debug-only: `musify --yt-search <words>` prints what a YouTube Music search returns.
+#[cfg(debug_assertions)]
+fn yt_search(query: &str) {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    rt.block_on(async {
+        let Some(jar) = youtube::Jar::load() else { return println!("not connected") };
+        match youtube::Client::new(jar).search(query).await {
+            Err(e) => println!("search: {e}"),
+            Ok(r) => {
+                println!("songs: {}", r.songs.len());
+                for s in r.songs.iter().take(6) {
+                    println!("  {} | {} | {} | {:?} | art {}", s.title, s.artist, s.album, s.duration, s.thumbnail.is_some());
+                }
+                println!("albums/playlists: {}", r.collections.len());
+                for c in &r.collections {
+                    println!("  {:?} {} | {} | art {}", c.kind, c.title, c.subtitle, c.thumbnail.is_some());
+                }
+            }
+        }
+    });
 }
 
 /// Debug-only: `musify --yt-check` signs in from Firefox and prints what came back (counts, no names).

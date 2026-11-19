@@ -413,3 +413,44 @@ impl<M> canvas::Program<M> for LevelTrail {
         vec![f.into_geometry()]
     }
 }
+
+/// A rotating arc for "getting the song": clearly busy, unlike a paused play button.
+pub struct Spinner {
+    /// Seconds since anything; only its fraction matters.
+    pub t: f32,
+    pub color: Color,
+}
+
+impl<M> canvas::Program<M> for Spinner {
+    type State = ();
+
+    fn draw(&self, _: &(), renderer: &Renderer, _: &Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<Geometry> {
+        use iced::Radians;
+        use std::f32::consts::TAU;
+        let mut f = Frame::new(renderer, bounds.size());
+        let width = (bounds.width * 0.11).max(2.0);
+        let r = bounds.width.min(bounds.height) / 2.0 - width;
+        let center = f.center();
+        // The arc grows and shrinks while the whole thing turns, like a breathing loop.
+        let turn = self.t * TAU * 0.9;
+        let phase = (self.t * 1.3).fract();
+        let sweep = 0.25 + 0.5 * (0.5 - 0.5 * (phase * TAU).cos());
+        f.stroke(
+            &Path::circle(center, r),
+            Stroke::default().with_width(width).with_color(alpha(self.color, 0.18)),
+        );
+        let arc = Path::new(|p| {
+            p.arc(canvas::path::Arc {
+                center,
+                radius: r,
+                start_angle: Radians(turn),
+                end_angle: Radians(turn + sweep * TAU),
+            })
+        });
+        f.stroke(
+            &arc,
+            Stroke::default().with_width(width).with_color(self.color).with_line_cap(canvas::LineCap::Round),
+        );
+        vec![f.into_geometry()]
+    }
+}

@@ -59,6 +59,13 @@ pub struct Shelf {
     pub items: Vec<Item>,
 }
 
+/// What a YouTube Music search found.
+#[derive(Debug, Clone, Default)]
+pub struct Results {
+    pub songs: Vec<Song>,
+    pub collections: Vec<Card>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Overview {
     pub playlists: Vec<Card>,
@@ -188,6 +195,33 @@ impl Client {
             }
         }
         Ok(Overview { playlists, home })
+    }
+
+    /// Searches all of YouTube Music: a songs-only search for the song list, and the general one
+    /// for albums and playlists.
+    pub async fn search(&self, query: &str) -> Result<Results, String> {
+        // The "Songs" filter chip, as the website sends it.
+        const SONGS: &str = "EgWKAQIIAWoMEA4QChADEAQQCRAF";
+        let (songs, all) = tokio::join!(
+            self.post("search", json!({ "query": query, "params": SONGS })),
+            self.post("search", json!({ "query": query })),
+        );
+        let mut results = Results::default();
+        for r in find_all(&songs?, "musicResponsiveListItemRenderer").into_iter().filter_map(parse_song) {
+            if !results.songs.iter().any(|s| s.video_id == r.video_id) {
+                results.songs.push(r);
+            }
+        }
+        if let Ok(all) = all {
+            for r in find_all(&all, "musicResponsiveListItemRenderer") {
+                if let Some(card) = parse_card_row(r)
+                    && !results.collections.iter().any(|c| c.browse_id == card.browse_id)
+                {
+                    results.collections.push(card);
+                }
+            }
+        }
+        Ok(results)
     }
 
     /// Songs in a playlist, mix or album.
@@ -321,6 +355,24 @@ fn parse_card(r: &Value) -> Option<Card> {
     })
 }
 
+/// Album and playlist rows in search results.
+fn parse_card_row(r: &Value) -> Option<Card> {
+    let nav = &r["navigationEndpoint"]["browseEndpoint"];
+    let browse_id = nav["browseId"].as_str()?.to_string();
+    let page_type = nav["browseEndpointContextSupportedConfigs"]["browseEndpointContextMusicConfig"]["pageType"].as_str().unwrap_or("");
+    let kind = match page_type {
+        "MUSIC_PAGE_TYPE_ALBUM" => CardKind::Album,
+        "MUSIC_PAGE_TYPE_PLAYLIST" if browse_id.starts_with("VLRD") => CardKind::Mix,
+        "MUSIC_PAGE_TYPE_PLAYLIST" => CardKind::Playlist,
+        _ => return None,
+    };
+    let title = text(column(r, 0));
+    // "Album • Daft Punk • 2013": the kind is shown by the tile already.
+    let subtitle = text(column(r, 1));
+    let subtitle = subtitle.split_once(" • ").filter(|(k, _)| matches!(*k, "Album" | "Playlist" | "Single" | "EP")).map_or(subtitle.clone(), |(_, rest)| rest.to_string());
+    (!title.is_empty()).then(|| Card { browse_id, title, subtitle, thumbnail: best_thumbnail(&r["thumbnail"]), kind })
+}
+
 /// Song tiles on the home page ("Listen again" etc.).
 fn parse_song_card(r: &Value) -> Option<Song> {
     let video_id = r["navigationEndpoint"]["watchEndpoint"]["videoId"].as_str()?.to_string();
@@ -360,14 +412,16 @@ fn parse_song(r: &Value) -> Option<Song> {
     let artist = parts.next().unwrap_or("").to_string();
     let album = {
         let third = text(column(r, 2));
-        if third.is_empty() { parts.next().unwrap_or("").to_string() } else { third }
+        // Search results put the play count there instead.
+        let counts = third.ends_with(" plays") || third.ends_with(" views");
+        if third.is_empty() || counts { parts.next().unwrap_or("").to_string() } else { third }
     };
     let duration = r["fixedColumns"][0]["musicResponsiveListItemFixedColumnRenderer"]["text"]["runs"][0]["text"]
         .as_str()
         .or_else(|| second.split(" • ").last())
         .and_then(parse_duration)
         .unwrap_or_default();
-    Some(Song { video_id, title, artist, album: if album.contains(':') { String::new() } else { album }, duration, thumbnail: best_thumbnail(&r["thumbnail"]) })
+    Some(Song { video_id, title, artist, album: if parse_duration(&album).is_some() { String::new() } else { album }, duration, thumbnail: best_thumbnail(&r["thumbnail"]) })
 }
 
 fn parse_duration(s: &str) -> Option<Duration> {

@@ -8,14 +8,14 @@ use iced::border::Radius;
 use iced::mouse::Interaction;
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, Space, button, canvas, column, container, float, image, mouse_area, opaque, row, scrollable, slider, space, stack,
+    Column, Space, button, canvas, tooltip, column, container, float, image, mouse_area, opaque, row, scrollable, slider, space, stack,
     text, text_input,
 };
 use iced::window::Direction;
 use iced::{Alignment, Color, ContentFit, Element, Font, Length, Padding, Vector};
 
 use crate::anim::{self, hover};
-use crate::canvas::{CoverArt, LevelTrail, Ribbon, RibbonStyle, Segment, Splash};
+use crate::canvas::{CoverArt, LevelTrail, Ribbon, RibbonStyle, Segment, Spinner, Splash};
 use crate::icons::{Icon, icon};
 use crate::library::{Library, ShelfItem, format_minutes, format_time};
 use crate::theme::{self, AMBER, AMBER_INK, HAZE, INK, LINE, PAPER, RAISED, SLATE, alpha};
@@ -44,9 +44,13 @@ fn icon_button<'a>(i: Icon, size: f32, side: f32, color: Color, msg: Option<Mess
     hover(b, alpha(PAPER, if enabled { 0.08 } else { 0.0 }), side / 2.0).into()
 }
 
-fn play_button<'a>(playing: bool, side: f32, msg: Message) -> El<'a> {
-    let i = if playing { Icon::Pause } else { Icon::Play };
-    button(container(icon(i, side * 0.42, AMBER_INK)).center(side))
+/// `loading` (a clock in seconds) swaps the icon for a spinner while the song is being fetched.
+fn play_button<'a>(playing: bool, loading: Option<f32>, side: f32, msg: Message) -> El<'a> {
+    let inner: El = match loading {
+        Some(t) => canvas(Spinner { t, color: AMBER_INK }).width(side * 0.46).height(side * 0.46).into(),
+        None => icon(if playing { Icon::Pause } else { Icon::Play }, side * 0.42, AMBER_INK).into(),
+    };
+    button(container(inner).center(side))
         .width(side)
         .height(side)
         .padding(0)
@@ -64,6 +68,39 @@ fn hairline<'a>() -> El<'a> {
 }
 
 impl Musify {
+    /// Seconds since launch, for looping animations.
+    fn clock(&self) -> f32 {
+        self.now.saturating_duration_since(self.booted).as_secs_f32()
+    }
+
+    /// The spinner clock while the current song is still downloading.
+    fn spin(&self) -> Option<f32> {
+        (self.waiting.is_some() && self.waiting == self.current_track()).then(|| self.clock())
+    }
+
+    /// What Now playing says under the artist: fetching, an error, or paused.
+    fn playback_status(&self) -> Option<El<'_>> {
+        if let Some(n) = &self.notice {
+            return Some(label(n, 14.0, theme::BODY, theme::ROSE).into());
+        }
+        if self.spin().is_some() {
+            return Some(
+                row![canvas(Spinner { t: self.clock(), color: AMBER }).width(16).height(16), label("Getting song…", 14.0, theme::STRONG, AMBER)]
+                    .spacing(10)
+                    .align_y(Alignment::Center)
+                    .into(),
+            );
+        }
+        (self.cursor.is_some() && !self.playing).then(|| {
+            container(
+                row![icon(Icon::Pause, 12.0, PAPER), label("Paused", 12.5, theme::STRONG, PAPER)].spacing(6).align_y(Alignment::Center),
+            )
+            .padding([4, 10])
+            .style(theme::rounded(alpha(PAPER, 0.12), 999.0))
+            .into()
+        })
+    }
+
     pub fn portrait(&self) -> bool {
         self.size.width < 1000.0 || self.size.height > self.size.width
     }
@@ -125,7 +162,7 @@ impl Musify {
     }
 
     fn history(&self) -> El<'_> {
-        let cell = |i, msg: Option<Message>| {
+        let cell = |i, msg: Option<Message>, radius: Radius| {
             let color = if msg.is_some() { PAPER } else { alpha(HAZE, 0.6) };
             let fill = if msg.is_some() { alpha(PAPER, 0.10) } else { Color::TRANSPARENT };
             hover(
@@ -134,14 +171,14 @@ impl Musify {
                     .style(theme::chrome_cell)
                     .on_press_maybe(msg),
                 fill,
-                0.0,
+                radius,
             )
         };
         container(
             row![
-                cell(Icon::Left, (!self.back.is_empty()).then_some(Message::Back)),
+                cell(Icon::Left, (!self.back.is_empty()).then_some(Message::Back), CAPSULE_LEFT),
                 capsule_divider(),
-                cell(Icon::Right, (!self.forward.is_empty()).then_some(Message::Forward)),
+                cell(Icon::Right, (!self.forward.is_empty()).then_some(Message::Forward), CAPSULE_RIGHT),
             ]
             .align_y(Alignment::Center),
         )
@@ -252,33 +289,43 @@ impl Musify {
                 8.0,
             )
         };
-        let tile = |color: Color, selected: bool, msg: Message| {
-            button(
-                row![
-                    container(Space::new().width(6).height(44)).style(theme::fill(color)),
-                    Space::new().width(38).height(44),
-                ],
+        // Each shelf item is its cover (Liked songs a heart), with its name on hover.
+        let tile = |art: El<'a>, name: String, detail: String, selected: bool, msg: Message| -> El<'a> {
+            let ring = container(art).padding(2).style(move |_: &iced::Theme| container::Style {
+                border: iced::Border { radius: 9.0.into(), width: 2.0, color: if selected { PAPER } else { Color::TRANSPARENT } },
+                ..Default::default()
+            });
+            let tip = container(
+                column![label(name, 13.5, theme::MEDIUM, PAPER), label(detail, 12.0, theme::BODY, HAZE)].spacing(1),
             )
-            .padding(0)
-            .style(move |_, s| {
-                let hovered = matches!(s, button::Status::Hovered | button::Status::Pressed);
-                button::Style {
-                    background: Some(alpha(color, if hovered { 0.36 } else { 0.22 }).into()),
-                    border: iced::Border {
-                        radius: 6.0.into(),
-                        width: if selected { 1.5 } else { 0.0 },
-                        color: PAPER,
-                    },
-                    ..Default::default()
-                }
-            })
-            .on_press(msg)
+            .padding([6, 10])
+            .style(theme::rounded(RAISED, 6.0));
+            tooltip(
+                hover(button(ring).padding(0).style(theme::plain).on_press(msg), alpha(PAPER, 0.08), 9.0),
+                tip,
+                tooltip::Position::Right,
+            )
+            .gap(10)
+            .into()
         };
+        let liked_art: El = container(icon(Icon::HeartFill, 20.0, AMBER_INK)).center(44).style(theme::rounded(AMBER, 6.0)).into();
 
-        let mut shelf = Column::new().spacing(8).align_x(Alignment::Center);
-        shelf = shelf.push(tile(AMBER, self.page == Page::Liked, Message::Open(Page::Liked)));
+        let mut shelf = Column::new().spacing(6).align_x(Alignment::Center);
+        shelf = shelf.push(tile(
+            liked_art,
+            "Liked songs".into(),
+            songs(self.source(Source::Liked).len()),
+            self.page == Page::Liked,
+            Message::Open(Page::Liked),
+        ));
         for (i, a) in lib.collections.iter().enumerate().filter(|(_, c)| c.saved) {
-            shelf = shelf.push(tile(a.cover.color, self.page == Page::Collection(i), Message::Open(Page::Collection(i))));
+            shelf = shelf.push(tile(
+                cover_art(&a.cover, 44.0),
+                a.title.clone(),
+                if a.browse_id.is_some() { collection_detail(a) } else { a.subtitle.clone() },
+                self.page == Page::Collection(i),
+                Message::Open(Page::Collection(i)),
+            ));
         }
 
         let content = column![
@@ -384,7 +431,7 @@ impl Musify {
         let this_album_playing = self.cursor.is_some() && self.queue_source == Some(Source::Collection(a));
         let play_msg = if this_album_playing { Message::TogglePlay } else { Message::PlayFrom(Source::Collection(a), 0) };
         let actions = row![
-            play_button(this_album_playing && self.playing, 56.0, play_msg),
+            play_button(this_album_playing && self.playing, None, 56.0, play_msg),
             icon_button(Icon::Shuffle, 22.0, 40.0, AMBER, Some(Message::PlayShuffled(Source::Collection(a)))),
         ]
         .spacing(14)
@@ -410,9 +457,11 @@ impl Musify {
             label(format!("{}, {}", songs(tracks.len()), format_minutes(total)), 14.0, theme::BODY, alpha(PAPER, 0.7)),
         ]
         .spacing(8);
+        let searching = source == Source::Search && self.searching;
         let body: El = if tracks.is_empty() {
             let hint = match source {
                 Source::Liked => "Songs you like show up here. Click the heart next to any song to add it.",
+                Source::Search if searching => "",
                 Source::Search => "Nothing matches. Try part of a song title, artist, or album name.",
                 _ => "No songs yet.",
             };
@@ -421,7 +470,7 @@ impl Musify {
             column![
                 container(
                     row![
-                        play_button(false, 56.0, Message::PlayFrom(source, 0)),
+                        play_button(false, None, 56.0, Message::PlayFrom(source, 0)),
                         icon_button(Icon::Shuffle, 22.0, 40.0, AMBER, Some(Message::PlayShuffled(source))),
                     ]
                     .spacing(14)
@@ -432,7 +481,42 @@ impl Musify {
             ]
             .into()
         };
-        column![container(heading).padding(Padding { top: 10.0, right: pad, bottom: 24.0, left: pad }), body].into()
+        let extra = (source == Source::Search).then(|| self.search_extras(lib, pad));
+        Column::new()
+            .push(container(heading).padding(Padding { top: 10.0, right: pad, bottom: 24.0, left: pad }))
+            .extend(extra)
+            .push(body)
+            .into()
+    }
+
+    /// Above the search's song list: whether YouTube is still looking, and the albums and playlists it found.
+    fn search_extras<'a>(&'a self, lib: &'a Library, pad: f32) -> El<'a> {
+        let mut col = Column::new().spacing(16).padding(Padding { top: 0.0, right: pad, bottom: 24.0, left: pad });
+        if self.searching {
+            col = col.push(
+                row![canvas(Spinner { t: self.clock(), color: AMBER }).width(16).height(16), label("Searching YouTube Music…", 14.0, theme::STRONG, AMBER)]
+                    .spacing(10)
+                    .align_y(Alignment::Center),
+            );
+        } else if let Some(e) = &self.search_error {
+            col = col.push(label(e, 14.0, theme::BODY, theme::ROSE));
+        } else if self.yt != crate::YtStatus::Ready {
+            col = col.push(label("Connect YouTube Music to search all of it, not only your library.", 14.0, theme::BODY, HAZE));
+        }
+        if self.found.query == self.query.trim() && !self.found.collections.is_empty() {
+            let mut tiles = row![].spacing(20);
+            for &c in &self.found.collections {
+                let a = &lib.collections[c];
+                tiles = tiles.push(tile(&a.cover, &a.title, a.subtitle.clone(), 150.0, Message::Open(Page::Collection(c))));
+            }
+            col = col.push(label("Albums and playlists", 20.0, theme::DISPLAY_M, PAPER)).push(
+                scrollable(tiles)
+                    .direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(4).scroller_width(4).spacing(10)))
+                    .style(theme::scroll),
+            );
+            col = col.push(Space::new().height(4)).push(label("Songs", 20.0, theme::DISPLAY_M, PAPER));
+        }
+        col.into()
     }
 
     fn home_page<'a>(&'a self, lib: &'a Library, portrait: bool, pad: f32) -> El<'a> {
@@ -679,7 +763,7 @@ impl Musify {
         row![
             icon_button(Icon::Shuffle, 18.0 * s, 32.0 * s, if self.shuffle { AMBER } else { HAZE }, Some(Message::ToggleShuffle)),
             icon_button(Icon::Prev, 20.0 * s, 32.0 * s, PAPER, Some(Message::Prev)),
-            play_button(self.playing, if big { 60.0 } else { 40.0 }, Message::TogglePlay),
+            play_button(self.playing, self.spin(), if big { 60.0 } else { 40.0 }, Message::TogglePlay),
             icon_button(Icon::Next, 20.0 * s, 32.0 * s, PAPER, Some(Message::Next)),
             repeat,
         ]
@@ -698,7 +782,13 @@ impl Musify {
         let liked = self.is_liked(t);
         let sub: El = match (&self.notice, self.waiting == Some(t)) {
             (Some(n), _) => label(n, 12.5, theme::BODY, theme::ROSE).into(),
-            (None, true) => label("Getting song…", 12.5, theme::BODY, AMBER).into(),
+            (None, true) => row![
+                canvas(Spinner { t: self.clock(), color: AMBER }).width(12).height(12),
+                label("Getting song…", 12.5, theme::BODY, AMBER),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into(),
             (None, false) => label(&track.artist, 12.5, theme::BODY, HAZE).into(),
         };
         row![
@@ -818,7 +908,11 @@ impl Musify {
         .spacing(16)
         .align_y(Alignment::Center);
         let words = column![
-            column![title, label(if track.album_title.is_empty() { track.artist.clone() } else { format!("{}, from {}", track.artist, track.album_title) }, 14.0, theme::BODY, alpha(PAPER, 0.7))].spacing(8),
+            Column::new()
+                .push(title)
+                .push(label(if track.album_title.is_empty() { track.artist.clone() } else { format!("{}, from {}", track.artist, track.album_title) }, 14.0, theme::BODY, alpha(PAPER, 0.7)))
+                .extend(self.playback_status().map(|s| column![Space::new().height(4), s].into()))
+                .spacing(8),
             self.lyrics_view(),
         ]
         .spacing(36);
@@ -839,7 +933,11 @@ impl Musify {
         let device = if self.audio.is_silent() { "No sound device: playing silently" } else { "System output" };
         let dock = column![
             row![
-                container(label(format!("{} of {}", format_time(self.position), format_time(self.current_duration())), 14.0, theme::STRONG, PAPER))
+                container(if self.spin().is_some() {
+                    label("Getting song…", 14.0, theme::STRONG, AMBER)
+                } else {
+                    label(format!("{} of {}", format_time(self.position), format_time(self.current_duration())), 14.0, theme::STRONG, PAPER)
+                })
                     .width(Length::FillPortion(1)),
                 self.controls(true),
                 container(
@@ -984,14 +1082,14 @@ fn capsule_divider<'a>() -> El<'a> {
     container(Space::new().width(1).height(14)).style(theme::fill(alpha(PAPER, 0.1))).into()
 }
 
+/// Hover shapes for the end cells of a chrome capsule, matching its 15px corners.
+const CAPSULE_LEFT: Radius = Radius { top_left: 15.0, bottom_left: 15.0, top_right: 0.0, bottom_right: 0.0 };
+const CAPSULE_RIGHT: Radius = Radius { top_left: 0.0, bottom_left: 0.0, top_right: 15.0, bottom_right: 15.0 };
+
 /// Minimize, maximize, close: one capsule (Figma component "Window controls").
 fn window_controls<'a>() -> El<'a> {
-    let cell = |i, close: bool, msg| {
-        let (fill, radius) = if close {
-            (theme::ROSE, Radius { top_right: 15.0, bottom_right: 15.0, ..Default::default() })
-        } else {
-            (alpha(PAPER, 0.10), Radius::default())
-        };
+    let cell = |i, close: bool, msg, radius: Radius| {
+        let fill = if close { theme::ROSE } else { alpha(PAPER, 0.10) };
         hover(
             button(container(icon(i, 18.0, if close { PAPER } else { HAZE })).center_x(36).center_y(30))
                 .padding(0)
@@ -1003,11 +1101,11 @@ fn window_controls<'a>() -> El<'a> {
     };
     container(
         row![
-            cell(Icon::Minimize, false, Message::Minimize),
+            cell(Icon::Minimize, false, Message::Minimize, CAPSULE_LEFT),
             capsule_divider(),
-            cell(Icon::Maximize, false, Message::ToggleMaximize),
+            cell(Icon::Maximize, false, Message::ToggleMaximize, Radius::default()),
             capsule_divider(),
-            cell(Icon::Close, true, Message::Close),
+            cell(Icon::Close, true, Message::Close, CAPSULE_RIGHT),
         ]
         .align_y(Alignment::Center),
     )

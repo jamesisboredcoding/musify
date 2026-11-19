@@ -22,7 +22,7 @@ rusqlite = { version = "0.43.0", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha1 = "0.11.0"
-tokio = { version = "1", features = ["fs", "process", "rt", "time"] }
+tokio = { version = "1", features = ["fs", "macros", "process", "rt", "time"] }
 walkdir = "2.5.0"
 
 [profile.dev.package."*"]
