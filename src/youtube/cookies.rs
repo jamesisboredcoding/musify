@@ -49,7 +49,25 @@ fn private_dir(path: &Path) -> std::io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 
+fn now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+impl Cookie {
+    /// Still valid, and worth sending. Session cookies have no expiry (0).
+    fn useful(&self, now: i64) -> bool {
+        // ST-… cookies are per-page navigation state; Firefox keeps dozens of them and
+        // together they push requests past YouTube's size limit (413).
+        (self.expiry == 0 || self.expiry > now) && !self.name.starts_with("ST-")
+    }
+}
+
 impl Jar {
+    fn new(cookies: Vec<Cookie>) -> Jar {
+        let now = now();
+        Jar { cookies: cookies.into_iter().filter(|c| c.useful(now)).collect() }
+    }
+
     /// The value YouTube's private API signs requests with.
     pub fn sapisid(&self) -> Option<&str> {
         ["__Secure-3PAPISID", "SAPISID"]
@@ -84,7 +102,12 @@ impl Jar {
                 })
             })
             .collect();
-        let jar = Jar { cookies };
+        let before = cookies.len();
+        let jar = Jar::new(cookies);
+        if jar.cookies.len() < before {
+            // Rewrite without the stale ones so the file stays small.
+            let _ = jar.save();
+        }
         jar.sapisid().is_some().then_some(jar)
     }
 
@@ -173,7 +196,7 @@ fn read_profile(profile: &Path) -> Result<Vec<Cookie>, String> {
 pub fn import_firefox() -> Result<Jar, String> {
     for profile in firefox_profiles() {
         if let Ok(cookies) = read_profile(&profile) {
-            let jar = Jar { cookies };
+            let jar = Jar::new(cookies);
             if jar.sapisid().is_some() {
                 jar.save().map_err(|e| format!("Couldn't save your login: {e}"))?;
                 return Ok(jar);
