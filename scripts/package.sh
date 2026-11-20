@@ -19,7 +19,7 @@ strip -o "$work/musify" "$bin"
 # --- RPM ---
 top="$work/rpm"
 mkdir -p "$top/SOURCES"
-cp "$work/musify" assets/musify.desktop assets/icons/musify.svg assets/icons/musify-256.png "$top/SOURCES/"
+cp "$work/musify" LICENSE assets/musify.desktop assets/icons/musify.svg assets/icons/musify-256.png "$top/SOURCES/"
 rpmbuild -bb packaging/musify.spec --define "_topdir $top" --define "version $version" --quiet
 cp "$top"/RPMS/*/*.rpm "$dist/"
 
