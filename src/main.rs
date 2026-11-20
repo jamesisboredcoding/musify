@@ -6,6 +6,7 @@ mod icons;
 mod library;
 mod lyrics;
 mod theme;
+mod update;
 mod view;
 mod youtube;
 
@@ -95,6 +96,12 @@ pub enum Message {
     ToggleFullscreen,
     /// Show what's playing on your Discord profile.
     ToggleDiscord,
+    UpdateFound(Option<update::Release>),
+    UpdateInstall,
+    UpdateDone(Result<PathBuf, String>),
+    /// Start the new version and quit this one.
+    UpdateRestart,
+    OpenUrl(String),
     Maximized(bool),
     Fullscreen(bool),
     Close,
@@ -147,6 +154,17 @@ pub struct Found {
     pub collections: Vec<usize>,
 }
 
+/// A newer Musify on GitHub, and how far installing it got.
+#[derive(Debug, Clone)]
+pub enum Updating {
+    Idle,
+    Available(update::Release),
+    Installing(update::Release),
+    /// Installed; restarting runs this program.
+    Ready(PathBuf),
+    Failed(update::Release, String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum YtStatus {
     Off,
@@ -165,6 +183,8 @@ pub struct Musify {
     pub size: Size,
     pub maximized: bool,
     pub fullscreen: bool,
+    pub install: update::Install,
+    pub updating: Updating,
     /// Running while the Discord status is on.
     pub discord: Option<discord::Discord>,
     discord_sent: Option<discord::Presence>,
@@ -245,6 +265,8 @@ impl Musify {
             size: initial_size(),
             maximized: false,
             fullscreen: false,
+            install: update::install(),
+            updating: Updating::Idle,
             discord: (load_discord() && discord::Discord::configured()).then(discord::Discord::start),
             discord_sent: None,
             root,
@@ -309,7 +331,13 @@ impl Musify {
             async move { tokio::task::spawn_blocking(move || library::scan(scan_root)).await.unwrap_or_default() },
             |lib| Message::Loaded(Arc::new(lib)),
         );
-        (app, Task::batch([window::oldest().map(Message::WindowId), scan]))
+        // Release builds look for a newer version on GitHub once per launch.
+        let check = if cfg!(debug_assertions) && std::env::var_os("MUSIFY_UPDATE_CHECK").is_none() {
+            Task::none()
+        } else {
+            Task::perform(update::check(app.http.clone(), app.install), Message::UpdateFound)
+        };
+        (app, Task::batch([window::oldest().map(Message::WindowId), scan, check]))
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -401,6 +429,37 @@ impl Musify {
                 }
                 self.discord_sent = None;
                 save_discord(self.discord.is_some());
+            }
+            Message::UpdateFound(Some(release)) => self.updating = Updating::Available(release),
+            Message::UpdateFound(None) => {}
+            Message::UpdateInstall => {
+                let release = match &self.updating {
+                    Updating::Available(r) | Updating::Failed(r, _) => r.clone(),
+                    _ => return Task::none(),
+                };
+                if release.asset.is_none() {
+                    // Built from source (or no matching download): show the release page.
+                    return self.update(Message::OpenUrl(release.page));
+                }
+                self.updating = Updating::Installing(release.clone());
+                return Task::perform(update::apply(self.install, release), Message::UpdateDone);
+            }
+            Message::UpdateDone(result) => {
+                let Updating::Installing(release) = &self.updating else { return Task::none() };
+                self.updating = match result {
+                    Ok(program) => Updating::Ready(program),
+                    Err(e) => Updating::Failed(release.clone(), e),
+                };
+            }
+            Message::UpdateRestart => {
+                if let Updating::Ready(program) = &self.updating
+                    && std::process::Command::new(program).spawn().is_ok()
+                {
+                    return iced::exit();
+                }
+            }
+            Message::OpenUrl(url) => {
+                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
             }
             Message::Close => return iced::exit(),
             Message::Loaded(lib) => {
@@ -816,6 +875,7 @@ impl Musify {
             // The "getting song" spinner turns.
             || self.waiting.is_some()
             || self.searching
+            || matches!(self.updating, Updating::Installing(_))
     }
 
     /// Content slides in and the cover-colored wash crossfades to the new page.

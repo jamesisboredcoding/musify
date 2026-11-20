@@ -154,8 +154,10 @@ impl Musify {
             space::horizontal(),
             center.unwrap_or_else(|| space::horizontal().width(0).into()),
             space::horizontal(),
+            self.update_pill().unwrap_or_else(|| Space::new().into()),
             window_controls(),
         ]
+        .spacing(10)
         .align_y(Alignment::Center)
         .padding(Padding { top: 14.0, right: 20.0, bottom: 10.0, left: 24.0 });
         mouse_area(bar).on_press(Message::Drag).on_double_click(Message::ToggleFullscreen).into()
@@ -185,6 +187,29 @@ impl Musify {
         .style(theme::capsule)
         .clip(true)
         .into()
+    }
+
+    /// Top-right notice when a newer Musify is out.
+    fn update_pill(&self) -> Option<El<'_>> {
+        use crate::Updating;
+        let (text_, color, msg): (String, Color, Option<Message>) = match &self.updating {
+            Updating::Idle => return None,
+            Updating::Available(r) if r.asset.is_none() => (format!("Musify {} is out", r.version), AMBER, Some(Message::UpdateInstall)),
+            Updating::Available(r) => (format!("Update to {}", r.version), AMBER, Some(Message::UpdateInstall)),
+            Updating::Installing(r) => (format!("Installing {}…", r.version), HAZE, None),
+            Updating::Ready(_) => ("Restart to finish updating".into(), AMBER, Some(Message::UpdateRestart)),
+            Updating::Failed(_, e) => (format!("Update failed, retry? ({e})"), theme::ROSE, Some(Message::UpdateInstall)),
+        };
+        let lead: El = if matches!(self.updating, Updating::Installing(_)) {
+            canvas(Spinner { t: self.clock(), color: HAZE }).width(14).height(14).into()
+        } else {
+            icon(Icon::Down, 16.0, color).into()
+        };
+        let pill = button(row![lead, label(text_, 13.0, theme::STRONG, color)].spacing(8).align_y(Alignment::Center))
+            .padding(Padding { top: 6.0, right: 14.0, bottom: 6.0, left: 10.0 })
+            .style(theme::pill)
+            .on_press_maybe(msg);
+        Some(container(pill).max_width(420).into())
     }
 
     // ---------- rail ----------

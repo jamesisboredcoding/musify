@@ -3,6 +3,17 @@
 A music player for Linux, written in Rust with [iced](https://iced.rs). It plays your YouTube
 Music library and music from a folder on your computer.
 
+## Install
+
+Download the AppImage or the RPM from [Releases](https://github.com/jamesisboredcoding/musify/releases):
+
+- **AppImage:** `chmod +x Musify-*.AppImage` and run it.
+- **RPM (Fedora):** `sudo dnf install ./musify-*.rpm`
+
+When a newer version is out, an update button appears at the top right. It replaces the
+AppImage in place, or installs the new RPM (asking for your password). Musify checks GitHub
+for new releases once each time it starts.
+
 ## Build
 
 Playback uses rodio, which needs the ALSA headers:
@@ -13,6 +24,7 @@ cargo run --release
 ```
 
 To add Musify to your app launcher, run `scripts/install-desktop.sh "$PWD/target/release/musify"`.
+`scripts/package.sh` builds the RPM and AppImage into `dist/`.
 
 ## YouTube Music
 
