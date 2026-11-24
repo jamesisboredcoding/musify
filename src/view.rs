@@ -78,7 +78,6 @@ impl Musify {
         (self.waiting.is_some() && self.waiting == self.current_track()).then(|| self.clock())
     }
 
-    /// What Now playing says under the artist: fetching, an error, or paused.
     /// Offered after a download failed because yt-dlp is too old.
     fn ytdlp_button(&self) -> Option<El<'_>> {
         (self.ytdlp_stale || self.ytdlp_updating).then(|| {
@@ -90,6 +89,7 @@ impl Musify {
         })
     }
 
+    /// What Now playing says under the artist: fetching, an error, or paused.
     fn playback_status(&self) -> Option<El<'_>> {
         if let Some(n) = &self.notice {
             return Some(

@@ -475,8 +475,10 @@ impl Musify {
                     Ok(()) => {
                         self.ytdlp_stale = false;
                         self.notice = None;
-                        // Try the song that failed again.
-                        return self.start();
+                        // Try the song that failed again, unless something else started meanwhile.
+                        if !self.playing && self.position.is_zero() {
+                            return self.start();
+                        }
                     }
                     Err(e) => self.notice = Some(e),
                 }
@@ -1011,6 +1013,7 @@ impl Musify {
         self.lyric_line = None;
         self.lyric_from = None;
         self.notice = None;
+        self.ytdlp_stale = false;
         let lyrics = self.find_lyrics(t);
         let art = match (&track.cover.remote, &track.cover.hires) {
             (Some(url), None) => {

@@ -41,6 +41,10 @@ pub async fn update_ytdlp() -> Result<(), String> {
         return Ok(());
     }
     let err = String::from_utf8_lossy(&output.stderr);
+    // PEP 668: Debian, Ubuntu and Arch don't let pip install into the user's Python.
+    if err.contains("externally-managed-environment") {
+        return Err("Your system manages Python packages; update yt-dlp with your package manager.".into());
+    }
     Err(format!("pip couldn't update yt-dlp: {}", err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error")))
 }
 
