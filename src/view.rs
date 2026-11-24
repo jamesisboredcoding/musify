@@ -79,9 +79,22 @@ impl Musify {
     }
 
     /// What Now playing says under the artist: fetching, an error, or paused.
+    /// Offered after a download failed because yt-dlp is too old.
+    fn ytdlp_button(&self) -> Option<El<'_>> {
+        (self.ytdlp_stale || self.ytdlp_updating).then(|| {
+            button(label(if self.ytdlp_updating { "Updating yt-dlp…" } else { "Update yt-dlp" }, 12.5, theme::STRONG, AMBER_INK))
+                .padding([4, 12])
+                .style(theme::amber(13.0))
+                .on_press_maybe((!self.ytdlp_updating).then_some(Message::UpdateYtDlp))
+                .into()
+        })
+    }
+
     fn playback_status(&self) -> Option<El<'_>> {
         if let Some(n) = &self.notice {
-            return Some(label(n, 14.0, theme::BODY, theme::ROSE).into());
+            return Some(
+                Column::new().push(label(n, 14.0, theme::BODY, theme::ROSE)).extend(self.ytdlp_button()).spacing(8).into(),
+            );
         }
         if self.spin().is_some() {
             return Some(
@@ -806,7 +819,10 @@ impl Musify {
         let track = &lib.tracks[t];
         let liked = self.is_liked(t);
         let sub: El = match (&self.notice, self.waiting == Some(t)) {
-            (Some(n), _) => label(n, 12.5, theme::BODY, theme::ROSE).into(),
+            (Some(n), _) => match self.ytdlp_button() {
+                Some(b) => row![b, label(n, 12.5, theme::BODY, theme::ROSE)].spacing(8).align_y(Alignment::Center).into(),
+                None => label(n, 12.5, theme::BODY, theme::ROSE).into(),
+            },
             (None, true) => row![
                 canvas(Spinner { t: self.clock(), color: AMBER }).width(12).height(12),
                 label("Getting song…", 12.5, theme::BODY, AMBER),

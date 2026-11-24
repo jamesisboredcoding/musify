@@ -17,13 +17,40 @@ pub fn cached(video_id: &str) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+/// The download error that means yt-dlp needs updating (the app offers a button for it).
+pub const OUTDATED: &str = "yt-dlp is out of date for YouTube's latest change.";
+
+/// pip's copy in ~/.local/bin first: apps started from the menu often don't have it on PATH.
+fn program() -> std::path::PathBuf {
+    let local = dirs::home_dir().unwrap_or_default().join(".local/bin/yt-dlp");
+    if local.is_file() { local } else { "yt-dlp".into() }
+}
+
+/// Updates yt-dlp and its challenge solver for this user with pip.
+pub async fn update_ytdlp() -> Result<(), String> {
+    let run = Command::new("python3")
+        .args(["-m", "pip", "install", "--user", "--upgrade", "yt-dlp", "yt-dlp-ejs"])
+        .kill_on_drop(true)
+        .output();
+    let output = match tokio::time::timeout(Duration::from_secs(300), run).await {
+        Err(_) => return Err("Updating yt-dlp took too long.".into()),
+        Ok(Err(e)) => return Err(format!("Couldn't run pip ({e})")),
+        Ok(Ok(o)) => o,
+    };
+    if output.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&output.stderr);
+    Err(format!("pip couldn't update yt-dlp: {}", err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error")))
+}
+
 pub async fn fetch(video_id: String) -> Result<PathBuf, String> {
     if let Some(path) = cached(&video_id) {
         return Ok(path);
     }
     let dir = cache_dir();
     tokio::fs::create_dir_all(&dir).await.map_err(|e| e.to_string())?;
-    let mut cmd = Command::new("yt-dlp");
+    let mut cmd = Command::new(program());
     cmd.args([
         "--format",
         "bestaudio[ext=m4a]/bestaudio",
@@ -66,6 +93,10 @@ pub async fn fetch(video_id: String) -> Result<PathBuf, String> {
         return Ok(path);
     }
     let err = String::from_utf8_lossy(&output.stderr);
+    // YouTube changes its player every few weeks; an old yt-dlp then finds no audio at all.
+    if err.contains("challenge solving failed") || err.contains("Requested format is not available") {
+        return Err(OUTDATED.into());
+    }
     let line = err.lines().rev().find(|l| l.contains("ERROR")).unwrap_or("yt-dlp couldn't get this song.");
     Err(line.trim_start_matches("ERROR: ").chars().take(160).collect())
 }

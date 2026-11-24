@@ -102,6 +102,8 @@ pub enum Message {
     /// Start the new version and quit this one.
     UpdateRestart,
     OpenUrl(String),
+    UpdateYtDlp,
+    YtDlpUpdated(Result<(), String>),
     Maximized(bool),
     Fullscreen(bool),
     Close,
@@ -185,6 +187,9 @@ pub struct Musify {
     pub fullscreen: bool,
     pub install: update::Install,
     pub updating: Updating,
+    /// The last download failed because yt-dlp is too old; the player offers to update it.
+    pub ytdlp_stale: bool,
+    pub ytdlp_updating: bool,
     /// Running while the Discord status is on.
     pub discord: Option<discord::Discord>,
     discord_sent: Option<discord::Presence>,
@@ -267,6 +272,8 @@ impl Musify {
             fullscreen: false,
             install: update::install(),
             updating: Updating::Idle,
+            ytdlp_stale: false,
+            ytdlp_updating: false,
             discord: (load_discord() && discord::Discord::configured()).then(discord::Discord::start),
             discord_sent: None,
             root,
@@ -456,6 +463,22 @@ impl Musify {
                     && std::process::Command::new(program).spawn().is_ok()
                 {
                     return iced::exit();
+                }
+            }
+            Message::UpdateYtDlp => {
+                self.ytdlp_updating = true;
+                return Task::perform(youtube::stream::update_ytdlp(), Message::YtDlpUpdated);
+            }
+            Message::YtDlpUpdated(result) => {
+                self.ytdlp_updating = false;
+                match result {
+                    Ok(()) => {
+                        self.ytdlp_stale = false;
+                        self.notice = None;
+                        // Try the song that failed again.
+                        return self.start();
+                    }
+                    Err(e) => self.notice = Some(e),
                 }
             }
             Message::OpenUrl(url) => {
@@ -790,7 +813,10 @@ impl Musify {
                         self.play_file(&path, t);
                         return self.prefetch();
                     }
-                    Err(e) => self.notice = Some(format!("Couldn't play {}: {e}", lib.tracks[t].title)),
+                    Err(e) => {
+                        self.ytdlp_stale = e == youtube::stream::OUTDATED;
+                        self.notice = Some(format!("Couldn't play {}: {e}", lib.tracks[t].title));
+                    }
                 }
             }
         }
